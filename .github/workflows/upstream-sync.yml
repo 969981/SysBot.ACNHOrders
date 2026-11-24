@@ -1,0 +1,24 @@
+name: Sync upstream and publish SysBot.ACNHOrders
+
+on:
+  schedule:
+    - cron: '3,13,23,33,43,53 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/upstream-sync.yml'
+      - '.github/workflows/upstream-build.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  sync-build-release:
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: [main, lowintent]
+    uses: ./.github/workflows/upstream-build.yml
+    with:
+      branch: ${{ matrix.branch }}

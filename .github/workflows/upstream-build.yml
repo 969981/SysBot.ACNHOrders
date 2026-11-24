@@ -1,0 +1,153 @@
+name: Sync, build and release one upstream branch
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        type: string
+        required: true
+
+concurrency:
+  group: sysbot-acnhorders-upstream-${{ inputs.branch }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      head: ${{ steps.sync.outputs.head }}
+      upstream: ${{ steps.sync.outputs.upstream }}
+      tag: ${{ steps.sync.outputs.tag }}
+      build: ${{ steps.sync.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+      - name: Fetch and merge upstream without rewriting local history
+        id: sync
+        shell: bash
+        env:
+          BRANCH: ${{ inputs.branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "$BRANCH" in main|lowintent) ;; *) exit 1 ;; esac
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/berichan/SysBot.ACNHOrders.git
+          git fetch --no-tags upstream "refs/heads/$BRANCH"
+          upstream="$(git rev-parse FETCH_HEAD)"
+          if ! git merge-base --is-ancestor "$upstream" HEAD; then
+            git merge --no-edit "$upstream"
+            git push origin "HEAD:refs/heads/$BRANCH"
+          fi
+          head="$(git rev-parse HEAD)"
+          tag="upstream-$BRANCH-$upstream"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,assets > "$RUNNER_TEMP/release.json" 2>/dev/null; then
+            jq -e '
+              .isDraft == false and
+              ([.assets[] | select(.size > 0) | .name] |
+              contains(["SysBot.ACNHOrders-win-x64.zip", "SysBot.ACNHOrders-linux-x64.tar.gz", "SysBot.ACNHOrders-linux-arm64.tar.gz", "SHA256SUMS.txt"]))
+            ' "$RUNNER_TEMP/release.json" >/dev/null || { echo "::error::Existing release is incomplete; inspect it before retrying."; exit 1; }
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Already published: $tag"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.build == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.head }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Run existing unit tests
+        shell: pwsh
+        run: |
+          dotnet test Tests/SysBot.ACNHOrders.Tests/SysBot.ACNHOrders.Tests.csproj -c Release --logger 'console;verbosity=normal'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and package Windows x64 and Linux x64/ARM64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = Join-Path $env:RUNNER_TEMP 'release-assets'
+          New-Item -ItemType Directory -Force -Path $assets | Out-Null
+          foreach ($rid in @('win-x64', 'linux-x64', 'linux-arm64')) {
+            $out = Join-Path $env:RUNNER_TEMP "publish-$rid"
+            $appHost = if ($rid -eq 'win-x64') { 'true' } else { 'false' }
+            dotnet publish SysBot.ACNHOrders.csproj -c Release -f net10.0 -r $rid --self-contained false "-p:UseAppHost=$appHost" -o $out
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            foreach ($file in @('SysBot.ACNHOrders.dll','SysBot.ACNHOrders.runtimeconfig.json','SysBot.ACNHOrders.deps.json','NHSE.Core.dll','NHSE.Villagers.dll','SysBot.Base.dll')) {
+              if (-not (Test-Path (Join-Path $out $file) -PathType Leaf)) { throw "Missing $rid/$file" }
+            }
+            if ($rid -eq 'win-x64') {
+              if (-not (Test-Path (Join-Path $out 'SysBot.ACNHOrders.exe') -PathType Leaf)) { throw 'Missing Windows executable' }
+              Compress-Archive -Path "$out/*" -DestinationPath (Join-Path $assets "SysBot.ACNHOrders-$rid.zip")
+            } else {
+              tar -czf (Join-Path $assets "SysBot.ACNHOrders-$rid.tar.gz") -C $out .
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
+          $files = @(Get-ChildItem $assets -File | Sort-Object Name)
+          if ($files.Count -ne 3 -or @($files | Where-Object Length -le 0).Count -ne 0) { throw 'Invalid release assets' }
+          $files | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)"
+          } | Set-Content (Join-Path $assets 'SHA256SUMS.txt') -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sysbot-${{ inputs.branch }}-packages
+          path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: [sync, build]
+    if: needs.sync.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sysbot-${{ inputs.branch }}-packages
+          path: release-assets
+      - name: Verify checksums and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ inputs.branch }}
+          TAG: ${{ needs.sync.outputs.tag }}
+          HEAD_SHA: ${{ needs.sync.outputs.head }}
+          UPSTREAM_SHA: ${{ needs.sync.outputs.upstream }}
+        run: |
+          set -euo pipefail
+          (cd release-assets && sha256sum -c SHA256SUMS.txt)
+          for f in SysBot.ACNHOrders-win-x64.zip SysBot.ACNHOrders-linux-x64.tar.gz SysBot.ACNHOrders-linux-arm64.tar.gz; do
+            test -s "release-assets/$f"
+          done
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release already exists; refusing to overwrite."
+            exit 1
+          fi
+          printf 'Automated build from berichan/SysBot.ACNHOrders.\n\nUpstream: https://github.com/berichan/SysBot.ACNHOrders/commit/%s\nBranch: %s\nBuild commit: %s\n\nRequires .NET 10 Runtime. Windows: run SysBot.ACNHOrders.exe. Linux: run dotnet SysBot.ACNHOrders.dll after extraction.\n' "$UPSTREAM_SHA" "$BRANCH" "$HEAD_SHA" > notes.txt
+          flags=(--latest)
+          if [[ "$BRANCH" == lowintent ]]; then flags=(--prerelease --latest=false); fi
+          gh release create "$TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" --target "$HEAD_SHA" \
+            --title "SysBot.ACNHOrders $BRANCH (${UPSTREAM_SHA:0:12})" \
+            --notes-file notes.txt "${flags[@]}"
