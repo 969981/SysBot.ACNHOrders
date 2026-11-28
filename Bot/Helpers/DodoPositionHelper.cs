@@ -69,7 +69,12 @@ namespace SysBot.ACNHOrders
             Config = BotRunner.Config;
         }
 
-        public async Task<ulong> FollowMainPointer(long[] jumps, CancellationToken token) => await Connection.PointerAll(jumps, token).ConfigureAwait(false);
+        public async Task<ulong> FollowMainPointer(long[] jumps, CancellationToken token)
+        {
+            ulong address = await Connection.PointerAll(jumps, token).ConfigureAwait(false);
+            if (address == 0) throw new IOException("Pointer unavailable; stop before dependent memory operation.");
+            return address;
+        }
 
         public async Task CloseGate(uint Offset, CancellationToken token)
         {

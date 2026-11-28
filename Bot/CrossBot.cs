@@ -110,6 +110,7 @@ namespace SysBot.ACNHOrders
                 return;
             }
 
+            guard.Begin("startup");
             // Disconnect our virtual controller; will reconnect once we send a button command after a request.
             LogUtil.LogInfo("Detaching controller on startup as first interaction.", Config.IP);
             await Connection.SendAsync(SwitchCommand.DetachController(), token).ConfigureAwait(false);
@@ -206,6 +207,7 @@ namespace SysBot.ACNHOrders
             if (Config.ForceUpdateAnchors)
                 LogUtil.LogInfo("Force update anchors set to true, no functionality will activate", Config.IP);
 
+            guard.Complete();
             LogUtil.LogInfo("Successfully connected to bot. Starting main loop!", Config.IP);
             if (Config.DodoModeConfig.LimitedDodoRestoreOnlyMode)
             {
@@ -260,6 +262,7 @@ namespace SysBot.ACNHOrders
                 var existingCode = await ReadVerifiedDodoCode(token).ConfigureAwait(false);
                 if (existingCode == null)
                     throw new IOException("Existing Dodo session not verified; operator must reconcile before restart.");
+                recoveryGuard!.Begin("dodo-active-session");
                 DodoCode = existingCode;
 
                 if (DodoPosition.IsDodoValid(DodoCode) && Config.DodoModeConfig.EchoDodoChannels.Count > 0)
@@ -284,7 +287,7 @@ namespace SysBot.ACNHOrders
                     if (RestoreRestartRequested)
                     {
                         RestoreRestartRequested = false;
-                        recoveryGuard!.Begin("dodo-restart");
+                        recoveryGuard!.RequireIntent();
                         await ResetFiles(token).ConfigureAwait(false);
                         await AttemptEchoHook($"[{DateTime.Now:yyyy-MM-dd hh:mm:ss tt}] Please wait for the new dodo code for {TownName}.", Config.DodoModeConfig.EchoDodoChannels, token).ConfigureAwait(false);
                         return true;
@@ -386,7 +389,7 @@ namespace SysBot.ACNHOrders
                             RestoreRestartRequested = true;
                 }
 
-                recoveryGuard!.Begin("dodo-restore");
+                recoveryGuard!.RequireIntent();
                 if (Config.DodoModeConfig.EchoDodoChannels.Count > 0)
                     await AttemptEchoHook($"[{DateTime.Now:yyyy-MM-dd hh:mm:ss tt}] Crash detected on {TownName}. Please wait while I get a new Dodo code.", Config.DodoModeConfig.EchoDodoChannels, token).ConfigureAwait(false);
                 NotifyState(GameState.Fetching);
@@ -1184,6 +1187,7 @@ namespace SysBot.ACNHOrders
                 return false;
 
             ulong offset = await DodoPosition.FollowMainPointer(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
+            if (offset == 0 || offset > ulong.MaxValue - 0x3F) throw new IOException("Anchor pointer unavailable.");
             await SwitchConnection.WriteBytesAbsoluteAsync(anchors[index].Anchor1, offset, token).ConfigureAwait(false);
             await SwitchConnection.WriteBytesAbsoluteAsync(anchors[index].Anchor2, offset + 0x3C, token).ConfigureAwait(false);
 
@@ -1193,6 +1197,7 @@ namespace SysBot.ACNHOrders
         private async Task<PosRotAnchor> ReadAnchor(CancellationToken token)
         {
             ulong offset = await DodoPosition.FollowMainPointer(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
+            if (offset == 0 || offset > ulong.MaxValue - 0x3F) throw new IOException("Anchor pointer unavailable.");
             var bytesA = await SwitchConnection.ReadBytesAbsoluteAsync(offset, 0xC, token).ConfigureAwait(false);
             var bytesB = await SwitchConnection.ReadBytesAbsoluteAsync(offset + 0x3C, 0x4, token).ConfigureAwait(false);
             var sequentinalAnchor = bytesA.Concat(bytesB).ToArray();
