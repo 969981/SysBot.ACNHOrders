@@ -11,6 +11,18 @@ namespace SysBot.ACNHOrders
     {
         public static async Task RunFrom(CrossBotConfig config, CancellationToken cancel, TwitchConfig? tConfig = null)
         {
+            // A reserved-order diagnostic uses the shared native adapter only.
+            // It never constructs CrossBot or accepts external commands.
+            if (config.NativeReservedOrderProbeOnly)
+            {
+                config.AcceptingCommands = false;
+#if PLATFORM_CANDIDATE
+                await NativeReservedOrderProbe.RunAsync(config, cancel).ConfigureAwait(false);
+                return;
+#else
+                throw new InvalidOperationException("Native reserved-order probe requires Platform candidate.");
+#endif
+            }
             // Native preflight never constructs CrossBot or starts external command services.
             if (config.NativePreflightOnly)
             {

@@ -47,6 +47,12 @@
     <Reference Include="NHSE.Villagers">
       <HintPath>deps\NHSE.Villagers.dll</HintPath>
     </Reference>
+    <Reference Include="SysBot.ACNH.Adapter" Condition="'$(PlatformCandidate)' == 'true'">
+      <HintPath>deps\SysBot.ACNH.Adapter.dll</HintPath>
+    </Reference>
+    <Reference Include="SysBot.Platform.Imaging" Condition="'$(PlatformCandidate)' == 'true'">
+      <HintPath>deps\SysBot.Platform.Imaging.dll</HintPath>
+    </Reference>
     <Reference Include="SysBot.Base">
       <HintPath>deps\SysBot.Base.dll</HintPath>
     </Reference>

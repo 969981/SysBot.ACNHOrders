@@ -45,6 +45,13 @@ namespace SysBot.ACNHOrders
         /// <summary>Explicit read-only SBP/2 diagnostic; never starts the order bot.</summary>
         public bool NativePreflightOnly { get; set; }
         public string NativeExpectedBuildId { get; set; } = string.Empty;
+        public bool NativeReservedOrderProbeOnly { get; set; }
+        public string NativeOrderId { get; set; } = string.Empty;
+        public string NativeCheckpointDirectory { get; set; } = string.Empty;
+        public ulong NativeExpectedProcessId { get; set; }
+        public ulong NativeExpectedTitleVersion { get; set; }
+        public ulong NativeExpectedMainBase { get; set; }
+        public ulong NativeExpectedHeapBase { get; set; }
 
         /// <summary> When enabled, the Bot will not allow RAM edits if the player's item metadata is invalid. </summary>
         /// <remarks> Only disable this as a last resort, and you have corrupted your item metadata through other means. </remarks>
