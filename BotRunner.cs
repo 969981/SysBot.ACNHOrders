@@ -11,8 +11,33 @@ namespace SysBot.ACNHOrders
     {
         public static async Task RunFrom(CrossBotConfig config, CancellationToken cancel, TwitchConfig? tConfig = null)
         {
+            // A reserved-order diagnostic uses the shared native adapter only.
+            // It never constructs CrossBot or accepts external commands.
+            int nativeModes=(config.NativeReservedOrderProbeOnly?1:0)+(config.NativePreflightOnly?1:0)+(config.NativeAirportEntryOnly?1:0);
+            if(nativeModes>1)throw new ArgumentException("Select exactly one native candidate mode.");
+            if (config.NativeReservedOrderProbeOnly || config.NativeAirportEntryOnly)
+            {
+                config.AcceptingCommands = false;
+#if PLATFORM_CANDIDATE
+                await NativeReservedOrderProbe.RunAsync(config, cancel).ConfigureAwait(false);
+                return;
+#else
+                throw new InvalidOperationException("Native reserved-order probe requires Platform candidate.");
+#endif
+            }
+            // Native preflight never constructs CrossBot or starts external command services.
+            if (config.NativePreflightOnly)
+            {
+                config.AcceptingCommands = false;
+#if PLATFORM_CANDIDATE
+                await NativeAcnhPreflight.RunAsync(config, cancel).ConfigureAwait(false);
+                return;
+#else
+                throw new InvalidOperationException("Native preflight requires the Platform candidate build.");
+#endif
+            }
             // Set up logging for Console Window
-            LogUtil.Forwarders.Add(Logger);
+            CompatibilityLogForwarder.Add(Logger);
             static void Logger(string msg, string identity) => Console.WriteLine(GetMessage(msg, identity));
             static string GetMessage(string msg, string identity) => $"> [{DateTime.Now:hh:mm:ss}] - {identity}: {msg}";
 
@@ -49,62 +74,9 @@ namespace SysBot.ACNHOrders
                 return;
             }
 
-            while (!cancel.IsCancellationRequested)
-            {
-                bot.Log("Starting bot loop.");
-
-                var task = bot.RunAsync(cancel);
-                await task.ConfigureAwait(false);
-
-                bool attemptReconnect = false;
-
-                if (task.IsFaulted)
-                {
-                    if (task.Exception == null)
-                    {
-                        bot.Log("Bot has terminated due to an unknown error.");
-                    }
-                    else
-                    {
-                        bot.Log("Bot has terminated due to an error:");
-                        foreach (var ex in task.Exception.InnerExceptions)
-                        {
-                            bot.Log(ex.Message);
-                            var st = ex.StackTrace;
-                            if (st != null)
-                                bot.Log(st);
-                        }
-                    }
-                    attemptReconnect = false;
-                }
-                else
-                {
-                    bot.Log("Bot has terminated.");
-                   // if (config.DodoModeConfig.LimitedDodoRestoreOnlyMode) // don't restore ordermode crashes
-                   // {
-                        attemptReconnect = true;
-                        bot.Log("Please wait... Attempting to reconnect in 10 seconds.");
-                   // }
-                }
-
-                if (attemptReconnect)
-                {
-                    await Task.Delay(10_000, cancel).ConfigureAwait(false);
-                    bot.Log("Bot is attempting a restart...");
-                    bot = new CrossBot(config);
-                    Globals.Bot = bot;
-
-                    await sys.Disconnect();
-                    sys = new SysCord(bot);
-                    Globals.Self = sys;
-                    bot.Log("Restarting Discord.");
-#pragma warning disable 4014
-                    Task.Run(() => sys.MainAsync(config.Token, cancel), cancel);
-#pragma warning restore 4014
-                }
-                else
-                    break;
-            }
+            // The compatibility candidate never automatically reconnects or replays.
+            // RunCandidateAsync owns the physical device lock before any device I/O.
+            await bot.RunCandidateAsync(cancel).ConfigureAwait(false);
         }
     }
 }

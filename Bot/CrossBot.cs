@@ -60,7 +60,22 @@ namespace SysBot.ACNHOrders
 
         public VillagerHelper Villagers { get; private set; } = VillagerHelper.Empty;
 
+#if PLATFORM_CANDIDATE
+        private async Task<bool> IsAirportLoadingScreenAsync(CancellationToken token)
+        {
+            byte[] jpeg = SwitchConnection switch
+            {
+                SwitchSocketAsync tcp => await tcp.PixelPeek(token).ConfigureAwait(false),
+                SwitchUSBAsync usb => await usb.PixelPeek(token).ConfigureAwait(false),
+                _ => throw new NotSupportedException("Screenshot transport unavailable.")
+            };
+            return AirportScreenEvidence.IsLoading(jpeg);
+        }
+#else
         private readonly RegionScreenshotComparer LoadingScreenPixelComparer = new RegionScreenshotComparer(274, 24, 1, 1, new Rgba32(2, 2, 2, 255), 2);
+        private Task<bool> IsAirportLoadingScreenAsync(CancellationToken token) =>
+            CompareScreenImageAsync(SwitchConnection, LoadingScreenPixelComparer, token);
+#endif
 
         public ISwitchConnectionAsync SwitchConnectedConnection => SwitchConnection;
 
@@ -85,8 +100,43 @@ namespace SysBot.ACNHOrders
 
         public override void SoftStop() => Config.AcceptingCommands = false;
 
+        private LegacyRecoveryGuard? recoveryGuard;
+        private byte[]? airportArrivalAnchor;
+        // BotRunner must call this entry point instead of base RunAsync: the
+        // device reservation must precede connection, EchoCommands and SetController.
+        public async Task RunCandidateAsync(CancellationToken token)
+        {
+            if (Config.DodoModeConfig.FreezeMap || Config.ExperimentalFreezeDodoCodeRetrieval)
+                throw new InvalidOperationException("Native verified Freeze backend required for freeze-enabled profiles.");
+            airportArrivalAnchor = LegacyRecoveryGuard.ParseArrivalAnchor(Environment.GetEnvironmentVariable("ACNH_AIRPORT_ARRIVAL_ANCHOR_HEX"));
+            using var guard = LegacyRecoveryGuard.OpenFromEnvironment();
+            recoveryGuard = guard;
+            bool connectAttempted = false;
+            try
+            {
+                token.ThrowIfCancellationRequested();
+                guard.Begin("startup");
+                connectAttempted = true;
+                Connection.Connect();
+                await RequireEmptyLegacyFreeze(token).ConfigureAwait(false);
+                await InitialStartup(token).ConfigureAwait(false);
+#if PLATFORM_CANDIDATE
+                await SetController(ControllerType.ProController, token).ConfigureAwait(false);
+#endif
+                await MainLoop(token).ConfigureAwait(false);
+            }
+            finally
+            {
+                Config.AcceptingCommands = false;
+                try { if (connectAttempted) Connection.Disconnect(); }
+                finally { recoveryGuard = null; }
+            }
+        }
+
         public override async Task MainLoop(CancellationToken token)
         {
+            var guard = recoveryGuard ?? throw new InvalidOperationException("RunCandidateAsync required.");
+            guard.RequireIntent();
             // Validate map spawn vector
             if (Config.MapPlaceX < 0 || Config.MapPlaceX >= ((int)OffsetHelper.LegacyAcreWidth * 32))
             {
@@ -196,6 +246,7 @@ namespace SysBot.ACNHOrders
             if (Config.ForceUpdateAnchors)
                 LogUtil.LogInfo("Force update anchors set to true, no functionality will activate", Config.IP);
 
+            guard.Complete();
             LogUtil.LogInfo("Successfully connected to bot. Starting main loop!", Config.IP);
             if (Config.DodoModeConfig.LimitedDodoRestoreOnlyMode)
             {
@@ -214,13 +265,14 @@ namespace SysBot.ACNHOrders
                 LogUtil.LogInfo("Orders not accepted in dodo restore mode! Please ensure all joy-cons and controllers are docked! Starting dodo restore loop...", Config.IP);
                 try
                 {
+                    bool restart = false;
                     while (!token.IsCancellationRequested)
-                        await DodoRestoreLoop(false, token).ConfigureAwait(false);
+                        restart = await DodoRestoreLoop(restart, token).ConfigureAwait(false);
                 }
-                catch (Exception e) 
+                catch (Exception e)
                 {
                     LogUtil.LogError($"Dodo restore loop ended with error: {e.Message}\r\n{e.StackTrace}", Config.IP);
-                    return;
+                    throw;
                 }
             }
 
@@ -236,7 +288,7 @@ namespace SysBot.ACNHOrders
             }
         }
 
-        private async Task DodoRestoreLoop(bool immediateRestart, CancellationToken token)
+        private async Task<bool> DodoRestoreLoop(bool immediateRestart, CancellationToken token)
         {
             await EnsureAnchorsAreInitialised(token);
             await VisitorList.UpdateNames(token).ConfigureAwait(false);
@@ -246,8 +298,11 @@ namespace SysBot.ACNHOrders
             bool hardCrash = immediateRestart;
             if (!immediateRestart)
             {
-                byte[] bytes = await Connection.ReadBytesAsync((uint)OffsetHelper.DodoAddress, 0x5, token).ConfigureAwait(false);
-                DodoCode = Encoding.UTF8.GetString(bytes, 0, 5);
+                var existingCode = await ReadVerifiedDodoCode(token).ConfigureAwait(false);
+                if (existingCode == null)
+                    throw new IOException("Existing Dodo session not verified; operator must reconcile before restart.");
+                recoveryGuard!.Begin("dodo-active-session");
+                DodoCode = existingCode;
 
                 if (DodoPosition.IsDodoValid(DodoCode) && Config.DodoModeConfig.EchoDodoChannels.Count > 0)
                     await AttemptEchoHook($"[{DateTime.Now:yyyy-MM-dd hh:mm:ss tt}] The Dodo code for {TownName} has updated, the new Dodo code is: {DodoCode}.", Config.DodoModeConfig.EchoDodoChannels, token).ConfigureAwait(false);
@@ -271,10 +326,10 @@ namespace SysBot.ACNHOrders
                     if (RestoreRestartRequested)
                     {
                         RestoreRestartRequested = false;
+                        recoveryGuard!.RequireIntent();
                         await ResetFiles(token).ConfigureAwait(false);
                         await AttemptEchoHook($"[{DateTime.Now:yyyy-MM-dd hh:mm:ss tt}] Please wait for the new dodo code for {TownName}.", Config.DodoModeConfig.EchoDodoChannels, token).ConfigureAwait(false);
-                        await DodoRestoreLoop(true, token).ConfigureAwait(false);
-                        return;
+                        return true;
                     }
 
                     NotifyState(GameState.Active);
@@ -373,6 +428,7 @@ namespace SysBot.ACNHOrders
                             RestoreRestartRequested = true;
                 }
 
+                recoveryGuard!.RequireIntent();
                 if (Config.DodoModeConfig.EchoDodoChannels.Count > 0)
                     await AttemptEchoHook($"[{DateTime.Now:yyyy-MM-dd hh:mm:ss tt}] Crash detected on {TownName}. Please wait while I get a new Dodo code.", Config.DodoModeConfig.EchoDodoChannels, token).ConfigureAwait(false);
                 NotifyState(GameState.Fetching);
@@ -400,19 +456,23 @@ namespace SysBot.ACNHOrders
                 LogUtil.LogInfo($"End overworld wait loop.", Config.IP);
             }
 
+            if (immediateRestart && !recoveryGuard!.HasActiveIntent)
+                throw new InvalidOperationException("Missing Dodo restart intent.");
             var result = await ExecuteOrderStart(DummyRequest, true, hardCrash, token).ConfigureAwait(false);
 
             if (result != OrderResult.Success)
             {
-                LogUtil.LogError($"Dodo restore failed with error: {result}. Restarting game...", Config.IP);
-                await DodoRestoreLoop(true, token).ConfigureAwait(false);
-                return;
+                throw new IOException($"Dodo restore failed: {result}; persistent intent retained, no automatic replay.");
             }
 
+            if (await ReadVerifiedDodoCode(token).ConfigureAwait(false) != DodoCode)
+                throw new IOException("Restored Dodo session not verified.");
             await SaveDodoCodeToFile(token).ConfigureAwait(false);
             LogUtil.LogInfo($"Dodo restore successful. New dodo for {TownName} is {DodoCode} and saved to {Config.DodoModeConfig.DodoRestoreFilename}.", Config.IP);
             if (Config.DodoModeConfig.RefreshMap) // clean map
                 await ClearMapAndSpawnInternally(null, Map, Config.DodoModeConfig.RefreshTerrainData, token, true).ConfigureAwait(false);
+            recoveryGuard!.Complete();
+            return false;
         }
 
         // hacked in discord forward, should really be a delegate or resusable forwarder
@@ -443,7 +503,11 @@ namespace SysBot.ACNHOrders
 
             if (Orders.TryDequeue(out var item) && item != null)
             {
+                recoveryGuard!.Begin("order-" + item.OrderID);
                 var result = await ExecuteOrder(item, token).ConfigureAwait(false);
+                if (result != OrderResult.Success)
+                    throw new IOException($"Order result {result}; unresolved intent retained.");
+                recoveryGuard.Complete();
                 
                 // Cleanup
                 LogUtil.LogInfo($"Exited order with result: {result}", Config.IP);
@@ -477,8 +541,9 @@ namespace SysBot.ACNHOrders
             Speaks.ClearQueue();
 
             int timeOut = (Config.OrderConfig.UserTimeAllowed + 360) * 1_000; // 360 seconds = 6 minutes
-            var cts = new CancellationTokenSource(timeOut);
-            var cToken = cts.Token; // tokens need combining, somehow & eventually
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            cts.CancelAfter(timeOut);
+            var cToken = cts.Token;
             OrderResult result = OrderResult.Faulted;
             var orderTask = GameIsDirty ? ExecuteOrderStart(order, false, true, cToken) : ExecuteOrderMidway(order, cToken);
             try
@@ -488,17 +553,20 @@ namespace SysBot.ACNHOrders
             catch (OperationCanceledException e)
             {
                 LogUtil.LogInfo($"{order.VillagerName} ({order.UserGuid}) had their order timeout: {e.Message}.", Config.IP);
-                order.OrderCancelled(this, "Unfortunately a game crash occured while your order was in progress. Sorry, your request has been removed.", true);
+                GameIsDirty = true;
+                throw; // unknown side effects: no EndSession, no next order
             }
 
             if (result == OrderResult.Success)
             {
                 GameIsDirty = await CloseGate(token).ConfigureAwait(false);
+                if (GameIsDirty)
+                    throw new IOException("Gate closure not confirmed; order intent retained.");
             }
             else
             {
-                await EndSession(token).ConfigureAwait(false);
                 GameIsDirty = true;
+                throw new IOException($"Order result {result} requires reconciliation; no automatic cleanup.");
             }
 
             if (result == OrderResult.NoArrival || result == OrderResult.NoLeave)
@@ -640,6 +708,8 @@ namespace SysBot.ACNHOrders
                 await SendAnchorBytes(2, token).ConfigureAwait(false);
             }, token);
 
+            if (!atAirport)
+                throw new IOException("Airport entrance anchor not verified.");
             await Task.Delay(0_500, token).ConfigureAwait(false);
 
             LogUtil.LogInfo($"Entering airport.", Config.IP);
@@ -723,6 +793,8 @@ namespace SysBot.ACNHOrders
                 return OrderResult.Faulted;
             }
 
+            if (await ReadVerifiedDodoCode(token).ConfigureAwait(false) != DodoPosition.DodoCode)
+                throw new IOException("Dodo code/session changed before publication.");
             DodoCode = DodoPosition.DodoCode;
             LastDodoFetchTime = DateTime.Now;
 
@@ -987,71 +1059,83 @@ namespace SysBot.ACNHOrders
             await Task.Delay(14_000, token).ConfigureAwait(false);
         }
 
+        private async Task RequireEmptyLegacyFreeze(CancellationToken token)
+        {
+            var raw = await SwitchConnection.ReadRaw(Encoding.ASCII.GetBytes("freezeCount\r\n"), 3, token).ConfigureAwait(false);
+            if (!LegacyRecoveryGuard.IsEmptyFreezeReply(raw))
+                throw new IOException("Legacy Freeze state not confirmed empty; native ownership backend or operator required.");
+        }
+
+        private async Task<string?> ReadVerifiedDodoCode(CancellationToken token)
+        {
+            if (!await IsNetworkSessionActive(token).ConfigureAwait(false)) return null;
+            var first = await Connection.ReadBytesAsync((uint)OffsetHelper.DodoAddress, 5, token).ConfigureAwait(false);
+            if (!await IsNetworkSessionActive(token).ConfigureAwait(false)) return null;
+            var second = await Connection.ReadBytesAsync((uint)OffsetHelper.DodoAddress, 5, token).ConfigureAwait(false);
+            if (!await IsNetworkSessionActive(token).ConfigureAwait(false)) return null;
+            return LegacyRecoveryGuard.VerifiedCode(first, second);
+        }
+
         private async Task EnterAirport(CancellationToken token)
         {
-            // Pause any freezers to account for loading screen lag
-            await SwitchConnection.SetFreezePauseState(true, token).ConfigureAwait(false);
+            // No Legacy freezePause/unpause: ownership cannot be verified.
+            await RequireEmptyLegacyFreeze(token).ConfigureAwait(false);
+            recoveryGuard!.RequireIntent();
+            if (!await DoesAnchorMatch(2, token).ConfigureAwait(false))
+                throw new IOException("Airport entry anchor not verified.");
+            if (await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false) != OverworldState.Overworld)
+                throw new IOException("Airport entry scene not stable.");
             await Task.Delay(0_200 + Config.ExtraTimeEnterAirportWait, token).ConfigureAwait(false);
-
-            int tries = 0;
-            var state = await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
-            var baseState = state;
-            bool isLoadingScreen = false;
-            while (baseState == state || !isLoadingScreen)
+            bool sawLoading = false;
+            for (int tries = 0; tries < 7 && !sawLoading; tries++)
             {
-                // Go into airport
-                LogUtil.LogInfo($"Attempting to enter airport. Try: {tries + 1}", Config.IP);
                 await SetStick(SwitchStick.LEFT, 20_000, 20_000, 0_400, token).ConfigureAwait(false);
-                await Task.Delay(0_500, token).ConfigureAwait(false);
-
-                state = await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
-
                 await SetStick(SwitchStick.LEFT, 0, 0, 0_600, token).ConfigureAwait(false);
-                await Task.Delay(1_000, token).ConfigureAwait(false);
-
-                if (!isLoadingScreen)
-                {
-                    isLoadingScreen = await CompareScreenImageAsync(SwitchConnection, LoadingScreenPixelComparer, token).ConfigureAwait(false);
-                    if (isLoadingScreen)
-                        LogUtil.LogInfo("Loading screen detected.", Config.IP);
-                }
-
-                tries++;
-                if (tries > 6)
-                    break;
+                var state = await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
+                sawLoading = state == OverworldState.Loading ||
+                    await IsAirportLoadingScreenAsync(token).ConfigureAwait(false);
+                if (!sawLoading && state != OverworldState.Overworld)
+                    throw new IOException("Unexpected airport entry scene.");
+                if (!sawLoading) await Task.Delay(500, token).ConfigureAwait(false);
             }
-
-            await Task.Delay(1_000, token).ConfigureAwait(false);
-            state = await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
-            isLoadingScreen = await CompareScreenImageAsync(SwitchConnection, LoadingScreenPixelComparer, token).ConfigureAwait(false);
-
-            tries = 0;
-            while (state != OverworldState.Overworld || isLoadingScreen)
+            if (!sawLoading) throw new TimeoutException("Airport loading transition not observed.");
+            int stable = 0;
+            for (int tries = 0; tries < 13; tries++)
             {
                 await Task.Delay(1_000, token).ConfigureAwait(false);
-                state = await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
-                isLoadingScreen = await CompareScreenImageAsync(SwitchConnection, LoadingScreenPixelComparer, token).ConfigureAwait(false);
-                tries++;
-                if (tries > 12)
-                    break;
+                var state = await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
+                bool loading = await IsAirportLoadingScreenAsync(token).ConfigureAwait(false);
+                if (state == OverworldState.Overworld && !loading &&
+                    (await ReadAnchor(token).ConfigureAwait(false)).AnchorBytes.SequenceEqual(airportArrivalAnchor!))
+                {
+                    if (++stable >= 2) return;
+                }
+                else stable = 0;
             }
-
-            // Delay for animation
-            await Task.Delay(1_500, token).ConfigureAwait(false);
-            await SwitchConnection.SetFreezePauseState(false, token).ConfigureAwait(false);
+            throw new TimeoutException("Airport destination not independently verified; no subsequent gate actions.");
         }
 
         private async Task InjectOrder(MapTerrainLite updatedMap, CancellationToken token)
         {
+            recoveryGuard!.RequireIntent();
             // Inject order onto map
             var mapChunks = updatedMap.GenerateReturnBytes(Config.MapPullChunkSize, (uint)OffsetHelper.FieldItemStartLayer1);
             for (int i = 0; i < mapChunks.Length; ++i)
-                await Connection.WriteBytesAsync(mapChunks[i].ToSend, mapChunks[i].Offset, token).ConfigureAwait(false);
+            {
+                var chunk = mapChunks[i];
+                await Connection.WriteBytesAsync(chunk.ToSend, chunk.Offset, token).ConfigureAwait(false);
+                var actual = await Connection.ReadBytesAsync(chunk.Offset, chunk.ToSend.Length, token).ConfigureAwait(false);
+                if (!actual.SequenceEqual(chunk.ToSend))
+                    throw new IOException("Order chunk readback mismatch; persistent intent retained.");
+            }
         }
 
         /// <returns>Whether or not the connection is active at the end of the close gate function</returns>
         private async Task<bool> CloseGate(CancellationToken token)
         {
+            recoveryGuard!.RequireIntent();
+            if (!await IsNetworkSessionActive(token).ConfigureAwait(false))
+                throw new IOException("Gate session not verified; no closure replay.");
             // Teleport to airport entry anchor  (twice, in case we get pulled back)
             await SendAnchorBytes(2, token).ConfigureAwait(false);
             await Task.Delay(0_500, token).ConfigureAwait(false);
@@ -1065,7 +1149,9 @@ namespace SysBot.ACNHOrders
             await Task.Delay(0_500, token).ConfigureAwait(false);
             await SendAnchorBytes(3, token).ConfigureAwait(false);
 
-            // Close gate (fail-safe without checking if open)
+            if (!await DoesAnchorMatch(3, token).ConfigureAwait(false))
+                throw new IOException("Orville anchor not verified; no gate mutation.");
+            // Close gate after verifying session and anchor
             await DodoPosition.CloseGate((uint)OffsetHelper.DodoAddress, token).ConfigureAwait(false);
 
             await Task.Delay(2_000, token).ConfigureAwait(false);
@@ -1119,7 +1205,7 @@ namespace SysBot.ACNHOrders
         public async Task<bool> UpdateAnchor(int index, CancellationToken token)
         {
             var anchors = Anchors.Anchors;
-            if (index < 0 || index > anchors.Length)
+            if (index < 0 || index >= anchors.Length)
                 return false;
 
             var anchor = await ReadAnchor(token).ConfigureAwait(false);
@@ -1136,10 +1222,11 @@ namespace SysBot.ACNHOrders
         public async Task<bool> SendAnchorBytes(int index, CancellationToken token)
         {
             var anchors = Anchors.Anchors;
-            if (index < 0 || index > anchors.Length)
+            if (index < 0 || index >= anchors.Length)
                 return false;
 
             ulong offset = await DodoPosition.FollowMainPointer(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
+            if (offset == 0 || offset > ulong.MaxValue - 0x3F) throw new IOException("Anchor pointer unavailable.");
             await SwitchConnection.WriteBytesAbsoluteAsync(anchors[index].Anchor1, offset, token).ConfigureAwait(false);
             await SwitchConnection.WriteBytesAbsoluteAsync(anchors[index].Anchor2, offset + 0x3C, token).ConfigureAwait(false);
 
@@ -1149,6 +1236,7 @@ namespace SysBot.ACNHOrders
         private async Task<PosRotAnchor> ReadAnchor(CancellationToken token)
         {
             ulong offset = await DodoPosition.FollowMainPointer(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
+            if (offset == 0 || offset > ulong.MaxValue - 0x3F) throw new IOException("Anchor pointer unavailable.");
             var bytesA = await SwitchConnection.ReadBytesAbsoluteAsync(offset, 0xC, token).ConfigureAwait(false);
             var bytesB = await SwitchConnection.ReadBytesAbsoluteAsync(offset + 0x3C, 0x4, token).ConfigureAwait(false);
             var sequentinalAnchor = bytesA.Concat(bytesB).ToArray();
@@ -1231,7 +1319,12 @@ namespace SysBot.ACNHOrders
             await FileUtil.WriteBytesToFileAsync(encodedText, Config.DodoModeConfig.VisitorListFilename, token).ConfigureAwait(false);
         }
 
-        private async Task<bool> IsNetworkSessionActive(CancellationToken token) => (await Connection.ReadBytesAsync((uint)OffsetHelper.OnlineSessionAddress, 0x1, token).ConfigureAwait(false))[0] == 1;
+        private async Task<bool> IsNetworkSessionActive(CancellationToken token)
+        {
+            var bytes = await Connection.ReadBytesAsync((uint)OffsetHelper.OnlineSessionAddress, 1, token).ConfigureAwait(false);
+            if (bytes.Length != 1 || bytes[0] > 1) throw new IOException("Online flag unavailable or invalid.");
+            return bytes[0] == 1;
+        }
 
         private async Task DropLoop(CancellationToken token)
         {
@@ -1452,8 +1545,9 @@ namespace SysBot.ACNHOrders
 
         public override async Task HardStop()
         {
-            await SetScreen(ScreenState.On, CancellationToken.None).ConfigureAwait(false);
-            await DetachController(CancellationToken.None).ConfigureAwait(false);
+            // No out-of-band HID or screen writes after an ambiguous stop.
+            Config.AcceptingCommands = false;
+            await Task.CompletedTask.ConfigureAwait(false);
         }
     }
 }

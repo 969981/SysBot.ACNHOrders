@@ -147,7 +147,7 @@ namespace SysBot.ACNHOrders
                 static string GetMessage(string msg, string identity) => $"> [{DateTime.Now:hh:mm:ss}] - {identity}: {msg}";
                 void Logger(string msg, string identity) => c.SendMessageAsync(GetMessage(msg, identity));
                 Action<string, string> l = Logger;
-                LogUtil.Forwarders.Add(l);
+                CompatibilityLogForwarder.Add(l);
             }
 
             await Task.Delay(100, CancellationToken.None).ConfigureAwait(false);
