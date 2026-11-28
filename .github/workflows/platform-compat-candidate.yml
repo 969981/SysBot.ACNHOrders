@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: 969981/SysBot.Platform
-          ref: 93e21682bee478c3d12c798bf2bac3066933c646
+          ref: 63d759d0871bf93510207d4a3a43456b92cad6f1
           path: platform-source
       - uses: actions/setup-dotnet@v4
         with:

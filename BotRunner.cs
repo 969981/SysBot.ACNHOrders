@@ -11,6 +11,17 @@ namespace SysBot.ACNHOrders
     {
         public static async Task RunFrom(CrossBotConfig config, CancellationToken cancel, TwitchConfig? tConfig = null)
         {
+            // Native preflight never constructs CrossBot or starts external command services.
+            if (config.NativePreflightOnly)
+            {
+                config.AcceptingCommands = false;
+#if PLATFORM_CANDIDATE
+                await NativeAcnhPreflight.RunAsync(config, cancel).ConfigureAwait(false);
+                return;
+#else
+                throw new InvalidOperationException("Native preflight requires the Platform candidate build.");
+#endif
+            }
             // Set up logging for Console Window
             CompatibilityLogForwarder.Add(Logger);
             static void Logger(string msg, string identity) => Console.WriteLine(GetMessage(msg, identity));

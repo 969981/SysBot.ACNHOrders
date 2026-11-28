@@ -42,6 +42,10 @@ namespace SysBot.ACNHOrders
         /// <summary> Skips creating bots when the program is started; helpful for testing integrations. </summary>
         public bool SkipConsoleBotCreation { get; set; }
 
+        /// <summary>Explicit read-only SBP/2 diagnostic; never starts the order bot.</summary>
+        public bool NativePreflightOnly { get; set; }
+        public string NativeExpectedBuildId { get; set; } = string.Empty;
+
         /// <summary> When enabled, the Bot will not allow RAM edits if the player's item metadata is invalid. </summary>
         /// <remarks> Only disable this as a last resort, and you have corrupted your item metadata through other means. </remarks>
         public bool RequireValidInventoryMetadata { get; set; } = true;
