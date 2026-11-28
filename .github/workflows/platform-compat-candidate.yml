@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: 969981/SysBot.Platform
-          ref: 4748b461bc7aabc7a279f52dea32cbd053cea381
+          ref: 47b9aadd8768f199f53e0e39429b88075a825843
           path: platform-source
       - uses: actions/setup-dotnet@v4
         with:
@@ -47,3 +47,9 @@ jobs:
           cp "$RUNNER_TEMP/platform-sdk/SysBot.Base.dll" "$RUNNER_TEMP/platform-sdk/SysBot.ACNH.Adapter.dll" "$RUNNER_TEMP/platform-sdk/SysBot.Platform.Imaging.dll" deps/
           rm -rf platform-source
           dotnet test Tests/SysBot.ACNHOrders.Tests/SysBot.ACNHOrders.Tests.csproj -c Release -p:PlatformCandidate=true --logger "console;verbosity=normal"
+          dotnet publish SysBot.ACNHOrders.csproj -c Release -f net10.0 -p:PlatformCandidate=true -o native-candidate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acnh-native-candidate-ubuntu
+          path: native-candidate/
+          retention-days: 7

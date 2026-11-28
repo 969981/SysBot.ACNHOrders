@@ -10,14 +10,20 @@ using SysBot.ACNH.Adapter;
 
 namespace SysBot.ACNHOrders
 {
-    /// <summary>Observe a preexisting native order under its exclusive reservation.
-    /// No create/bind, no write, HID, freeze mutation, checkpoint advance or release.</summary>
+    /// <summary>Explicit preexisting-order probe or one-shot airport maintenance.
+    /// No create/bind, no order services, automatic restart or replay.</summary>
     public static class NativeReservedOrderProbe
     {
         public static async Task RunAsync(CrossBotConfig config,CancellationToken ct)
         {
             if(config.NativePreflightOnly)throw new ArgumentException("Select exactly one diagnostic mode.");
             NativeAcnhPreflight.ValidateExpectedBuild(config.NativeExpectedBuildId);
+            byte[]? outside=null,inside=null;
+            if(config.NativeAirportEntryOnly){
+                outside=LegacyRecoveryGuard.ParseArrivalAnchor(config.NativeAirportOutsideAnchorHex);
+                inside=LegacyRecoveryGuard.ParseArrivalAnchor(config.NativeAirportInsideAnchorHex);
+                if(outside.AsSpan().SequenceEqual(inside))throw new ArgumentException("Independent source and destination anchors required.");
+            }
             var root=Environment.GetEnvironmentVariable("ACNH_RECOVERY_ROOT")??"";
             var slot=Environment.GetEnvironmentVariable("ACNH_DEVICE_SLOT")??"";
             if(!Path.IsPathFullyQualified(root)||!Path.IsPathFullyQualified(config.NativeCheckpointDirectory)||
@@ -36,6 +42,15 @@ namespace SysBot.ACNHOrders
             using var lease=new DeviceLifecycleCoordinator(root).Open(slot,order.OrderId);
             var profile=config.Protocol==SwitchProtocol.WiFi?BotbaseProfile.PlatformTcp2:BotbaseProfile.PlatformUsb2;
             await using var native=await AcnhNativeTransport.OpenAsync(config,profile,lease,store,expected,ct).ConfigureAwait(false);
+            if(config.NativeAirportEntryOnly){
+                // Original candidate EnterAirport movement: diagonal 400ms then neutral 600ms.
+                // No raw configure/anchor writes, no second attempt, no delivery authorization.
+                var motion=new[]{new Sbp2ControllerStep(400,new(Sbp2Buttons.None,20000,20000)),new Sbp2ControllerStep(600,default)};
+                var result=await native.EnterAirportAsync(order,OffsetHelper.PlayerCoordJumps,new[]{inside!},new[]{outside!},motion,AirportScreenEvidence.IsLoading,ct).ConfigureAwait(false);
+                if(!result.Ready)throw new IOException("Airport transition or pause release not verified; preserve reservation and reconcile.");
+                Console.WriteLine("Native airport candidate completed movement and owned pause release. Order still requires reconciliation; no delivery or Dodo publication.");
+                return;
+            }
             var jumps=(long[])OffsetHelper.PlayerCoordJumps.Clone();jumps[^1]=checked(jumps[^1]+0x20);
             var scene=await native.ReadPointerAsync(jumps,4,ct).ConfigureAwait(false);
             bool loading=AirportScreenEvidence.IsLoading(await native.CaptureAsync(ct).ConfigureAwait(false));

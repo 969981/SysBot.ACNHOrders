@@ -13,7 +13,9 @@ namespace SysBot.ACNHOrders
         {
             // A reserved-order diagnostic uses the shared native adapter only.
             // It never constructs CrossBot or accepts external commands.
-            if (config.NativeReservedOrderProbeOnly)
+            int nativeModes=(config.NativeReservedOrderProbeOnly?1:0)+(config.NativePreflightOnly?1:0)+(config.NativeAirportEntryOnly?1:0);
+            if(nativeModes>1)throw new ArgumentException("Select exactly one native candidate mode.");
+            if (config.NativeReservedOrderProbeOnly || config.NativeAirportEntryOnly)
             {
                 config.AcceptingCommands = false;
 #if PLATFORM_CANDIDATE

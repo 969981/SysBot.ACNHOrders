@@ -46,6 +46,10 @@ namespace SysBot.ACNHOrders
         public bool NativePreflightOnly { get; set; }
         public string NativeExpectedBuildId { get; set; } = string.Empty;
         public bool NativeReservedOrderProbeOnly { get; set; }
+        /// <summary>Explicit one-shot experimental airport movement; never starts order services.</summary>
+        public bool NativeAirportEntryOnly { get; set; }
+        public string NativeAirportOutsideAnchorHex { get; set; } = string.Empty;
+        public string NativeAirportInsideAnchorHex { get; set; } = string.Empty;
         public string NativeOrderId { get; set; } = string.Empty;
         public string NativeCheckpointDirectory { get; set; } = string.Empty;
         public ulong NativeExpectedProcessId { get; set; }
