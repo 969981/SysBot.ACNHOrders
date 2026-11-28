@@ -46,4 +46,4 @@ jobs:
           dotnet build platform-source/src/SysBot.Base/SysBot.Base.csproj -c Release -o "$RUNNER_TEMP/platform-sdk"
           cp "$RUNNER_TEMP/platform-sdk/SysBot.Base.dll" deps/SysBot.Base.dll
           rm -rf platform-source
-          dotnet test Tests/SysBot.ACNHOrders.Tests/SysBot.ACNHOrders.Tests.csproj -c Release --logger "console;verbosity=normal"
+          dotnet test Tests/SysBot.ACNHOrders.Tests/SysBot.ACNHOrders.Tests.csproj -c Release -p:PlatformCandidate=true --logger "console;verbosity=normal"

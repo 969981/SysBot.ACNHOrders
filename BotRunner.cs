@@ -49,62 +49,9 @@ namespace SysBot.ACNHOrders
                 return;
             }
 
-            while (!cancel.IsCancellationRequested)
-            {
-                bot.Log("Starting bot loop.");
-
-                var task = bot.RunAsync(cancel);
-                await task.ConfigureAwait(false);
-
-                bool attemptReconnect = false;
-
-                if (task.IsFaulted)
-                {
-                    if (task.Exception == null)
-                    {
-                        bot.Log("Bot has terminated due to an unknown error.");
-                    }
-                    else
-                    {
-                        bot.Log("Bot has terminated due to an error:");
-                        foreach (var ex in task.Exception.InnerExceptions)
-                        {
-                            bot.Log(ex.Message);
-                            var st = ex.StackTrace;
-                            if (st != null)
-                                bot.Log(st);
-                        }
-                    }
-                    attemptReconnect = false;
-                }
-                else
-                {
-                    bot.Log("Bot has terminated.");
-                   // if (config.DodoModeConfig.LimitedDodoRestoreOnlyMode) // don't restore ordermode crashes
-                   // {
-                        attemptReconnect = true;
-                        bot.Log("Please wait... Attempting to reconnect in 10 seconds.");
-                   // }
-                }
-
-                if (attemptReconnect)
-                {
-                    await Task.Delay(10_000, cancel).ConfigureAwait(false);
-                    bot.Log("Bot is attempting a restart...");
-                    bot = new CrossBot(config);
-                    Globals.Bot = bot;
-
-                    await sys.Disconnect();
-                    sys = new SysCord(bot);
-                    Globals.Self = sys;
-                    bot.Log("Restarting Discord.");
-#pragma warning disable 4014
-                    Task.Run(() => sys.MainAsync(config.Token, cancel), cancel);
-#pragma warning restore 4014
-                }
-                else
-                    break;
-            }
+            // The compatibility candidate never automatically reconnects or replays.
+            // RunCandidateAsync owns the physical device lock before any device I/O.
+            await bot.RunCandidateAsync(cancel).ConfigureAwait(false);
         }
     }
 }

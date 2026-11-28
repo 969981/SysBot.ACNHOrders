@@ -60,7 +60,22 @@ namespace SysBot.ACNHOrders
 
         public VillagerHelper Villagers { get; private set; } = VillagerHelper.Empty;
 
+#if PLATFORM_CANDIDATE
+        private async Task<bool> IsAirportLoadingScreenAsync(CancellationToken token)
+        {
+            byte[] jpeg = SwitchConnection switch
+            {
+                SwitchSocketAsync tcp => await tcp.PixelPeek(token).ConfigureAwait(false),
+                SwitchUSBAsync usb => await usb.PixelPeek(token).ConfigureAwait(false),
+                _ => throw new NotSupportedException("Screenshot transport unavailable.")
+            };
+            return AirportScreenEvidence.IsLoading(jpeg);
+        }
+#else
         private readonly RegionScreenshotComparer LoadingScreenPixelComparer = new RegionScreenshotComparer(274, 24, 1, 1, new Rgba32(2, 2, 2, 255), 2);
+        private Task<bool> IsAirportLoadingScreenAsync(CancellationToken token) =>
+            CompareScreenImageAsync(SwitchConnection, LoadingScreenPixelComparer, token);
+#endif
 
         public ISwitchConnectionAsync SwitchConnectedConnection => SwitchConnection;
 
@@ -87,16 +102,39 @@ namespace SysBot.ACNHOrders
 
         private LegacyRecoveryGuard? recoveryGuard;
         private byte[]? airportArrivalAnchor;
-        public override async Task MainLoop(CancellationToken token)
+        // BotRunner must call this entry point instead of base RunAsync: the
+        // device reservation must precede connection, EchoCommands and SetController.
+        public async Task RunCandidateAsync(CancellationToken token)
         {
-            // Candidate intentionally requires a stable physical slot shared by all local clients.
-            // Legacy has no verifiable freeze ownership; do not start freeze-enabled profiles.
             if (Config.DodoModeConfig.FreezeMap || Config.ExperimentalFreezeDodoCodeRetrieval)
                 throw new InvalidOperationException("Native verified Freeze backend required for freeze-enabled profiles.");
             airportArrivalAnchor = LegacyRecoveryGuard.ParseArrivalAnchor(Environment.GetEnvironmentVariable("ACNH_AIRPORT_ARRIVAL_ANCHOR_HEX"));
             using var guard = LegacyRecoveryGuard.OpenFromEnvironment();
             recoveryGuard = guard;
-            await RequireEmptyLegacyFreeze(token).ConfigureAwait(false);
+            bool connectAttempted = false;
+            try
+            {
+                token.ThrowIfCancellationRequested();
+                guard.Begin("startup");
+                connectAttempted = true;
+                Connection.Connect();
+                await RequireEmptyLegacyFreeze(token).ConfigureAwait(false);
+                await InitialStartup(token).ConfigureAwait(false);
+                await SetController(ControllerType.ProController, token).ConfigureAwait(false);
+                await MainLoop(token).ConfigureAwait(false);
+            }
+            finally
+            {
+                Config.AcceptingCommands = false;
+                try { if (connectAttempted) Connection.Disconnect(); }
+                finally { recoveryGuard = null; }
+            }
+        }
+
+        public override async Task MainLoop(CancellationToken token)
+        {
+            var guard = recoveryGuard ?? throw new InvalidOperationException("RunCandidateAsync required.");
+            guard.RequireIntent();
             // Validate map spawn vector
             if (Config.MapPlaceX < 0 || Config.MapPlaceX >= ((int)OffsetHelper.LegacyAcreWidth * 32))
             {
@@ -110,7 +148,6 @@ namespace SysBot.ACNHOrders
                 return;
             }
 
-            guard.Begin("startup");
             // Disconnect our virtual controller; will reconnect once we send a button command after a request.
             LogUtil.LogInfo("Detaching controller on startup as first interaction.", Config.IP);
             await Connection.SendAsync(SwitchCommand.DetachController(), token).ConfigureAwait(false);
@@ -230,10 +267,10 @@ namespace SysBot.ACNHOrders
                     while (!token.IsCancellationRequested)
                         restart = await DodoRestoreLoop(restart, token).ConfigureAwait(false);
                 }
-                catch (Exception e) 
+                catch (Exception e)
                 {
                     LogUtil.LogError($"Dodo restore loop ended with error: {e.Message}\r\n{e.StackTrace}", Config.IP);
-                    return;
+                    throw;
                 }
             }
 
@@ -1054,7 +1091,7 @@ namespace SysBot.ACNHOrders
                 await SetStick(SwitchStick.LEFT, 0, 0, 0_600, token).ConfigureAwait(false);
                 var state = await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
                 sawLoading = state == OverworldState.Loading ||
-                    await CompareScreenImageAsync(SwitchConnection, LoadingScreenPixelComparer, token).ConfigureAwait(false);
+                    await IsAirportLoadingScreenAsync(token).ConfigureAwait(false);
                 if (!sawLoading && state != OverworldState.Overworld)
                     throw new IOException("Unexpected airport entry scene.");
                 if (!sawLoading) await Task.Delay(500, token).ConfigureAwait(false);
@@ -1065,7 +1102,7 @@ namespace SysBot.ACNHOrders
             {
                 await Task.Delay(1_000, token).ConfigureAwait(false);
                 var state = await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
-                bool loading = await CompareScreenImageAsync(SwitchConnection, LoadingScreenPixelComparer, token).ConfigureAwait(false);
+                bool loading = await IsAirportLoadingScreenAsync(token).ConfigureAwait(false);
                 if (state == OverworldState.Overworld && !loading &&
                     (await ReadAnchor(token).ConfigureAwait(false)).AnchorBytes.SequenceEqual(airportArrivalAnchor!))
                 {
@@ -1506,8 +1543,9 @@ namespace SysBot.ACNHOrders
 
         public override async Task HardStop()
         {
-            await SetScreen(ScreenState.On, CancellationToken.None).ConfigureAwait(false);
-            await DetachController(CancellationToken.None).ConfigureAwait(false);
+            // No out-of-band HID or screen writes after an ambiguous stop.
+            Config.AcceptingCommands = false;
+            await Task.CompletedTask.ConfigureAwait(false);
         }
     }
 }
