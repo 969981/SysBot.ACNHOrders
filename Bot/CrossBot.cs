@@ -120,7 +120,9 @@ namespace SysBot.ACNHOrders
                 Connection.Connect();
                 await RequireEmptyLegacyFreeze(token).ConfigureAwait(false);
                 await InitialStartup(token).ConfigureAwait(false);
+#if PLATFORM_CANDIDATE
                 await SetController(ControllerType.ProController, token).ConfigureAwait(false);
+#endif
                 await MainLoop(token).ConfigureAwait(false);
             }
             finally
