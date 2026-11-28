@@ -57,6 +57,16 @@ namespace SysBot.ACNHOrders.Tests
             Assert.Equal(AirportEntryDecision.Wait, entry.Observe(null, false));
             Assert.Equal(AirportEntryDecision.Complete, entry.Observe(OverworldState.Overworld, false));
         }
+        [Fact] public void MissingObservationAfterMoveDoesNotAuthorizeReplay()
+        {
+            var entry = new AirportEntryObservation();
+            Assert.Equal(AirportEntryDecision.Move, entry.Observe(OverworldState.Overworld, false));
+            entry.MarkMoveSent();
+            Assert.Equal(AirportEntryDecision.Wait, entry.Observe(null, false));
+            Assert.Equal(AirportEntryDecision.Wait, entry.Observe(OverworldState.Overworld, false));
+            Assert.Equal(AirportEntryDecision.Wait, entry.Observe(OverworldState.Loading, true));
+            Assert.Equal(AirportEntryDecision.Complete, entry.Observe(OverworldState.Overworld, false));
+        }
         [Fact] public void UnknownDoesNotAuthorizeMoveOrCompletion()
         {
             var entry = new AirportEntryObservation();

@@ -52,6 +52,7 @@ namespace SysBot.ACNHOrders
     {
         private bool moveSent;
         private bool transitionSeen;
+        private bool uncertainAfterMove;
         public void MarkMoveSent() => moveSent = true;
         public AirportEntryDecision Observe(OverworldState? state, bool loadingScreen)
         {
@@ -63,8 +64,13 @@ namespace SysBot.ACNHOrders
                 transitionSeen = true;
                 return AirportEntryDecision.Wait;
             }
-            if (state != OverworldState.Overworld) return AirportEntryDecision.Wait;
-            return transitionSeen ? AirportEntryDecision.Complete : AirportEntryDecision.Move;
+            if (state != OverworldState.Overworld)
+            {
+                if (moveSent) uncertainAfterMove = true;
+                return AirportEntryDecision.Wait;
+            }
+            if (transitionSeen) return AirportEntryDecision.Complete;
+            return uncertainAfterMove ? AirportEntryDecision.Wait : AirportEntryDecision.Move;
         }
     }
 }
