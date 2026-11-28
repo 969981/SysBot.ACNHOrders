@@ -27,7 +27,8 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $PSNativeCommandUseErrorActionPreference=$true
-          $dll=(Resolve-Path 'deps/SysBot.Base.dll').Path
+          $originalPath=(Resolve-Path 'deps/SysBot.Base.dll').Path
+          $dll=$originalPath
           if((git hash-object $dll).Trim() -ne 'f8847c1a0d7f343fb03b427f6b0520401a1dbb7c'){throw 'Original DLL changed'}
           $useSdk='false'
           if($env:MODE -ne 'original'){
@@ -40,20 +41,38 @@ jobs:
             $dll=(Resolve-Path "$sdk/src/SysBot.Base/bin/Release/net10.0/SysBot.Base.dll").Path
             $useSdk='true'
           }
-          $props=@("-p:SysBotDllPath=$dll","-p:PlatformSdk=$useSdk")
+          # Both direct and sibling-assembly resolution must see the same candidate.
+          # The checked-in DLL is never changed in Git; only this disposable checkout is staged.
+          $expected=(Get-FileHash $dll -Algorithm SHA256).Hash
+          Write-Host "Expected SDK $env:MODE SHA256=$expected source=$dll"
+          if($useSdk -eq 'true'){
+            Copy-Item -LiteralPath $dll -Destination $originalPath -Force
+          }
+          if((Get-FileHash $originalPath).Hash -ne $expected){throw 'Staged SDK identity mismatch'}
+          $env:ACNH_EXPECTED_SDK_SHA256=$expected
+          $env:ACNH_EXPECTED_PLATFORM_SDK=$useSdk
+          $props=@("-p:SysBotDllPath=$originalPath","-p:PlatformSdk=$useSdk")
           $project='Tests/SysBot.ACNHOrders.Tests/SysBot.ACNHOrders.Tests.csproj'
-          dotnet test $project -c Release --logger 'console;verbosity=normal' @props
+          function AssertSdk([string]$f){
+            if(!(Test-Path -LiteralPath $f -PathType Leaf)){throw "Missing SDK: $f"}
+            $actual=(Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash
+            Write-Host "SDK identity $f actual=$actual expected=$expected"
+            if($actual -ne $expected){throw "Resolved SDK identity mismatch: $f"}
+          }
+          dotnet build $project -c Release @props
+          AssertSdk 'bin/Release/net10.0/SysBot.Base.dll'
+          AssertSdk 'Tests/SysBot.ACNHOrders.Tests/bin/Release/net10.0/SysBot.Base.dll'
+          dotnet test $project -c Release --no-build --no-restore --logger 'console;verbosity=normal' @props
           $out=Join-Path $env:RUNNER_TEMP 'candidate'
           dotnet publish SysBot.ACNHOrders.csproj -c Release -f net10.0 -r win-x64 --self-contained false -o $out @props
-          $expected=(Get-FileHash $dll).Hash
-          foreach($f in @('Tests/SysBot.ACNHOrders.Tests/bin/Release/net10.0/SysBot.Base.dll',"$out/SysBot.Base.dll")){
-            if((Get-FileHash $f).Hash -ne $expected){throw 'Resolved SDK identity mismatch'}
-          }
+          AssertSdk 'Tests/SysBot.ACNHOrders.Tests/bin/Release/net10.0/SysBot.Base.dll'
+          AssertSdk 'bin/Release/net10.0/win-x64/SysBot.Base.dll'
+          AssertSdk "$out/SysBot.Base.dll"
           foreach($f in @('SysBot.ACNHOrders.exe','SysBot.ACNHOrders.dll','SysBot.ACNHOrders.deps.json','NLog.dll')){
             if(!(Test-Path "$out/$f")){throw "Missing $f"}
           }
           if($useSdk -eq 'true' -and !(Test-Path "$out/LibUsbDotNet.dll")){throw 'Missing SDK USB dependency'}
-          @{commit=$env:GITHUB_SHA;mode=$env:MODE;dll_sha256=$expected;hardware_verified=$false} | ConvertTo-Json | Set-Content "$out/compatibility-evidence.json"
+          @{commit=$env:GITHUB_SHA;mode=$env:MODE;dll_sha256=$expected;runtime_identity_test=$true;hardware_verified=$false} | ConvertTo-Json | Set-Content "$out/compatibility-evidence.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: acnh-issue110-win-x64-${{ matrix.mode }}
