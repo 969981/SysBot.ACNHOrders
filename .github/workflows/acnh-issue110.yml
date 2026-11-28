@@ -1,0 +1,61 @@
+name: ACNH Issue 110 compatibility candidate
+on:
+  push:
+    branches: [fix/sysbotbase-issue110]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [original, v251, rc3]
+    env:
+      MODE: ${{ matrix.mode }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build, test and publish isolated Windows candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSNativeCommandUseErrorActionPreference=$true
+          $dll=(Resolve-Path 'deps/SysBot.Base.dll').Path
+          if((git hash-object $dll).Trim() -ne 'f8847c1a0d7f343fb03b427f6b0520401a1dbb7c'){throw 'Original DLL changed'}
+          $useSdk='false'
+          if($env:MODE -ne 'original'){
+            $sha=if($env:MODE -eq 'v251'){'5d330cbe85216f04d1fb7389e5f10aacf7240810'}else{'03d1b9cff2a71d2130c24cb762ef01b9ad833497'}
+            $sdk=Join-Path $env:RUNNER_TEMP 'platform'
+            git clone --no-checkout https://github.com/969981/SysBot.Platform.git $sdk
+            git -C $sdk checkout --detach $sha
+            if((git -C $sdk rev-parse HEAD).Trim() -ne $sha){throw 'SDK pin mismatch'}
+            dotnet build "$sdk/src/SysBot.Base/SysBot.Base.csproj" -c Release
+            $dll=(Resolve-Path "$sdk/src/SysBot.Base/bin/Release/net10.0/SysBot.Base.dll").Path
+            $useSdk='true'
+          }
+          $props=@("-p:SysBotDllPath=$dll","-p:PlatformSdk=$useSdk")
+          $project='Tests/SysBot.ACNHOrders.Tests/SysBot.ACNHOrders.Tests.csproj'
+          dotnet test $project -c Release --logger 'console;verbosity=normal' @props
+          $out=Join-Path $env:RUNNER_TEMP 'candidate'
+          dotnet publish SysBot.ACNHOrders.csproj -c Release -f net10.0 -r win-x64 --self-contained false -o $out @props
+          $expected=(Get-FileHash $dll).Hash
+          foreach($f in @('Tests/SysBot.ACNHOrders.Tests/bin/Release/net10.0/SysBot.Base.dll',"$out/SysBot.Base.dll")){
+            if((Get-FileHash $f).Hash -ne $expected){throw 'Resolved SDK identity mismatch'}
+          }
+          foreach($f in @('SysBot.ACNHOrders.exe','SysBot.ACNHOrders.dll','SysBot.ACNHOrders.deps.json','NLog.dll')){
+            if(!(Test-Path "$out/$f")){throw "Missing $f"}
+          }
+          if($useSdk -eq 'true' -and !(Test-Path "$out/LibUsbDotNet.dll")){throw 'Missing SDK USB dependency'}
+          @{commit=$env:GITHUB_SHA;mode=$env:MODE;dll_sha256=$expected;hardware_verified=$false} | ConvertTo-Json | Set-Content "$out/compatibility-evidence.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: acnh-issue110-win-x64-${{ matrix.mode }}
+          path: ${{ runner.temp }}/candidate/
+          if-no-files-found: error

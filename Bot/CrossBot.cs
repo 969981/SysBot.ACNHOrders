@@ -477,8 +477,9 @@ namespace SysBot.ACNHOrders
             Speaks.ClearQueue();
 
             int timeOut = (Config.OrderConfig.UserTimeAllowed + 360) * 1_000; // 360 seconds = 6 minutes
-            var cts = new CancellationTokenSource(timeOut);
-            var cToken = cts.Token; // tokens need combining, somehow & eventually
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            cts.CancelAfter(timeOut);
+            var cToken = cts.Token;
             OrderResult result = OrderResult.Faulted;
             var orderTask = GameIsDirty ? ExecuteOrderStart(order, false, true, cToken) : ExecuteOrderMidway(order, cToken);
             try
@@ -488,7 +489,9 @@ namespace SysBot.ACNHOrders
             catch (OperationCanceledException e)
             {
                 LogUtil.LogInfo($"{order.VillagerName} ({order.UserGuid}) had their order timeout: {e.Message}.", Config.IP);
-                order.OrderCancelled(this, "Unfortunately a game crash occured while your order was in progress. Sorry, your request has been removed.", true);
+                Config.AcceptingCommands = false;
+                GameIsDirty = true;
+                throw; // cancellation may follow side effects; do not run EndSession blindly
             }
 
             if (result == OrderResult.Success)
@@ -642,6 +645,7 @@ namespace SysBot.ACNHOrders
 
             await Task.Delay(0_500, token).ConfigureAwait(false);
 
+            if (!atAirport) throw new IOException("Airport entrance anchor was not reached.");
             LogUtil.LogInfo($"Entering airport.", Config.IP);
 
             await EnterAirport(token).ConfigureAwait(false);
@@ -989,56 +993,59 @@ namespace SysBot.ACNHOrders
 
         private async Task EnterAirport(CancellationToken token)
         {
-            // Pause any freezers to account for loading screen lag
-            await SwitchConnection.SetFreezePauseState(true, token).ConfigureAwait(false);
-            await Task.Delay(0_200 + Config.ExtraTimeEnterAirportWait, token).ConfigureAwait(false);
+            // Only read-only probes may be retried; do not fabricate Loading on read failure.
+            if (!await DoesAnchorMatch(2, token).ConfigureAwait(false) ||
+                await DodoPosition.ReadAirportObservation(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false) != OverworldState.Overworld ||
+                await CompareScreenImageAsync(SwitchConnection, LoadingScreenPixelComparer, token).ConfigureAwait(false))
+                throw new IOException("Airport entry origin is not confirmed.");
 
-            int tries = 0;
-            var state = await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
-            var baseState = state;
-            bool isLoadingScreen = false;
-            while (baseState == state || !isLoadingScreen)
+            bool pauseRequested = false;
+            try
             {
-                // Go into airport
-                LogUtil.LogInfo($"Attempting to enter airport. Try: {tries + 1}", Config.IP);
-                await SetStick(SwitchStick.LEFT, 20_000, 20_000, 0_400, token).ConfigureAwait(false);
-                await Task.Delay(0_500, token).ConfigureAwait(false);
+                pauseRequested = true; // set before transport send, which has no firmware ACK
+                await SwitchConnection.SetFreezePauseState(true, token).ConfigureAwait(false);
+                await Task.Delay(0_200 + Config.ExtraTimeEnterAirportWait, token).ConfigureAwait(false);
 
-                state = await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
-
-                await SetStick(SwitchStick.LEFT, 0, 0, 0_600, token).ConfigureAwait(false);
-                await Task.Delay(1_000, token).ConfigureAwait(false);
-
-                if (!isLoadingScreen)
+                var transition = new AirportEntryObservation();
+                int moves = 0;
+                for (int i = 0; i < 30; i++)
                 {
-                    isLoadingScreen = await CompareScreenImageAsync(SwitchConnection, LoadingScreenPixelComparer, token).ConfigureAwait(false);
-                    if (isLoadingScreen)
-                        LogUtil.LogInfo("Loading screen detected.", Config.IP);
+                    token.ThrowIfCancellationRequested();
+                    var state = await DodoPosition.ReadAirportObservation(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
+                    bool loadingScreen = await CompareScreenImageAsync(SwitchConnection, LoadingScreenPixelComparer, token).ConfigureAwait(false);
+                    var decision = transition.Observe(state, loadingScreen);
+                    if (decision == AirportEntryDecision.Complete)
+                    {
+                        await Task.Delay(1_500, token).ConfigureAwait(false);
+                        var final = await DodoPosition.ReadAirportObservation(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
+                        if (final != OverworldState.Overworld ||
+                            await CompareScreenImageAsync(SwitchConnection, LoadingScreenPixelComparer, token).ConfigureAwait(false))
+                            throw new IOException("Airport completion not stable.");
+                        await SwitchConnection.SetFreezePauseState(false, token).ConfigureAwait(false);
+                        pauseRequested = false;
+                        return;
+                    }
+                    if (decision == AirportEntryDecision.Move && moves < 7)
+                    {
+                        moves++;
+                        LogUtil.LogInfo($"Attempting to enter airport. Try: {moves}", Config.IP);
+                        await SetStick(SwitchStick.LEFT, 20_000, 20_000, 0_400, token).ConfigureAwait(false);
+                        await SetStick(SwitchStick.LEFT, 0, 0, 0_600, token).ConfigureAwait(false);
+                        transition.MarkMoveSent();
+                    }
+                    // Unknown and missing pointer never authorize further input.
+                    await Task.Delay(1_000, token).ConfigureAwait(false);
                 }
-
-                tries++;
-                if (tries > 6)
-                    break;
+                throw new IOException("Airport transition was not confirmed within the observation budget.");
             }
-
-            await Task.Delay(1_000, token).ConfigureAwait(false);
-            state = await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
-            isLoadingScreen = await CompareScreenImageAsync(SwitchConnection, LoadingScreenPixelComparer, token).ConfigureAwait(false);
-
-            tries = 0;
-            while (state != OverworldState.Overworld || isLoadingScreen)
+            catch
             {
-                await Task.Delay(1_000, token).ConfigureAwait(false);
-                state = await DodoPosition.GetOverworldState(OffsetHelper.PlayerCoordJumps, token).ConfigureAwait(false);
-                isLoadingScreen = await CompareScreenImageAsync(SwitchConnection, LoadingScreenPixelComparer, token).ConfigureAwait(false);
-                tries++;
-                if (tries > 12)
-                    break;
+                if (pauseRequested)
+                    LogUtil.LogError("Airport freeze pause/resume is unconfirmed; verify manually before restarting the bot.", Config.IP);
+                Config.AcceptingCommands = false;
+                GameIsDirty = true;
+                throw;
             }
-
-            // Delay for animation
-            await Task.Delay(1_500, token).ConfigureAwait(false);
-            await SwitchConnection.SetFreezePauseState(false, token).ConfigureAwait(false);
         }
 
         private async Task InjectOrder(MapTerrainLite updatedMap, CancellationToken token)

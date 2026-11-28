@@ -4,6 +4,7 @@
     <TargetFramework>net10.0</TargetFramework>
 
     <IsPackable>false</IsPackable>
+    <SysBotDllPath Condition="'$(SysBotDllPath)' == ''">$(MSBuildThisFileDirectory)../../deps/SysBot.Base.dll</SysBotDllPath>
   </PropertyGroup>
 
   <ItemGroup>
@@ -30,7 +31,7 @@
       <HintPath>..\..\deps\NHSE.Core.dll</HintPath>
     </Reference>
     <Reference Include="SysBot.Base">
-      <HintPath>..\..\deps\SysBot.Base.dll</HintPath>
+      <HintPath>$(SysBotDllPath)</HintPath>
     </Reference>
   </ItemGroup>
 

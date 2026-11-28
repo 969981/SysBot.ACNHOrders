@@ -156,13 +156,21 @@ namespace SysBot.ACNHOrders
 
         public async Task<OverworldState> GetOverworldState(long[] jumps, CancellationToken token)
         {
-            ulong coord = await FollowMainPointer(jumps, token).ConfigureAwait(false);
-            return await GetOverworldState(coord, token).ConfigureAwait(false);
+            var observation = await ReadAirportObservation(jumps, token).ConfigureAwait(false);
+            return observation ?? throw new IOException("Overworld pointer/read temporarily unavailable; no scene inferred.");
         }
+
+        // Nullable only for proven transient read errors. Other callers fail closed.
+        public Task<OverworldState?> ReadAirportObservation(long[] jumps, CancellationToken token) =>
+            AirportReadRecovery.ReadAsync(ct => FollowMainPointer(jumps, ct),
+                (address, ct) => Connection.ReadBytesAbsoluteAsync(address, 4, ct), token);
 
         public async Task<OverworldState> GetOverworldState(ulong CoordinateAddress, CancellationToken token)
         {
-            var x = BitConverter.ToUInt32(await Connection.ReadBytesAbsoluteAsync(CoordinateAddress + 0x20, 0x4, token).ConfigureAwait(false), 0);
+            var address = AirportReadRecovery.CheckedAddress(CoordinateAddress);
+            var bytes = await Connection.ReadBytesAbsoluteAsync(address, 4, token).ConfigureAwait(false);
+            if (bytes.Length != 4) throw new InvalidDataException("Unexpected overworld payload size.");
+            var x = BitConverter.ToUInt32(bytes, 0);
             //LogUtil.LogInfo($"CurrentVal: {x:X8}", Config.IP);
             return GetOverworldState(x);
         }
