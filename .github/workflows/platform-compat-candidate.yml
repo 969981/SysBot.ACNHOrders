@@ -1,0 +1,49 @@
+name: ACNH Platform compatibility candidate (no release)
+on:
+  push:
+    branches: [compat/platform-v2.6-acnh-recovery]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  legacy:
+    if: github.event_name == 'push' || github.head_ref == 'compat/platform-v2.6-acnh-recovery'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet test Tests/SysBot.ACNHOrders.Tests/SysBot.ACNHOrders.Tests.csproj -c Release --logger "console;verbosity=normal"
+      - run: dotnet publish SysBot.ACNHOrders.csproj -c Release -f net10.0 -o candidate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acnh-legacy-candidate-${{ matrix.os }}
+          path: candidate/
+          retention-days: 7
+  platform:
+    if: github.event_name == 'push' || github.head_ref == 'compat/platform-v2.6-acnh-recovery'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: 969981/SysBot.Platform
+          ref: 076e65e88b06d067e5691d10f17a44309fd42fa1
+          path: platform-source
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build pinned Platform SDK, then compile original bot against its DLL
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet build platform-source/src/SysBot.Base/SysBot.Base.csproj -c Release -o "$RUNNER_TEMP/platform-sdk"
+          cp "$RUNNER_TEMP/platform-sdk/SysBot.Base.dll" deps/SysBot.Base.dll
+          rm -rf platform-source
+          dotnet test Tests/SysBot.ACNHOrders.Tests/SysBot.ACNHOrders.Tests.csproj -c Release --logger "console;verbosity=normal"

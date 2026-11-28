@@ -22,7 +22,7 @@ namespace SysBot.ACNHOrders
     // Red's dodo retrieval and movement code. All credit to Red in the PKHeX support discord for the original version of the dodo-get function
     public class DodoPositionHelper
     {
-        private const string DodoPattern = @"^[A-Z0-9]*$";
+        private const string DodoPattern = @"\A[A-Z0-9]{5}\z";
 
         private const string ExperimentalDodoFetchRoutine =
                 "A,W{0}," +
@@ -162,7 +162,11 @@ namespace SysBot.ACNHOrders
 
         public async Task<OverworldState> GetOverworldState(ulong CoordinateAddress, CancellationToken token)
         {
-            var x = BitConverter.ToUInt32(await Connection.ReadBytesAbsoluteAsync(CoordinateAddress + 0x20, 0x4, token).ConfigureAwait(false), 0);
+            if (CoordinateAddress == 0 || CoordinateAddress > ulong.MaxValue - 0x23)
+                throw new IOException("Scene pointer unavailable; no absolute read attempted.");
+            var bytes = await Connection.ReadBytesAbsoluteAsync(CoordinateAddress + 0x20, 0x4, token).ConfigureAwait(false);
+            if (bytes.Length != 4) throw new IOException("Scene read length invalid.");
+            var x = BitConverter.ToUInt32(bytes, 0);
             //LogUtil.LogInfo($"CurrentVal: {x:X8}", Config.IP);
             return GetOverworldState(x);
         }
@@ -178,7 +182,7 @@ namespace SysBot.ACNHOrders
             _ => OverworldState.Unknown,
         };
 
-        public bool IsDodoValid(string dodoCode) => DodoRegex.IsMatch(dodoCode);
+        public bool IsDodoValid(string dodoCode) => dodoCode != null && DodoRegex.IsMatch(dodoCode);
 
         // In case player keeps opening up gates on local play
         public async Task GetDodoCodeLegacy(uint Offset, bool isRetry, CancellationToken token)
